@@ -1,0 +1,29 @@
+# ============================================================
+# CLOUDFLARE WORKER CONFIGURATION
+# ============================================================
+
+name = "roblox-harvester"
+main = "worker.js"
+compatibility_date = "2024-12-18"
+
+# ============================================================
+# ENVIRONMENT VARIABLES
+# ============================================================
+
+[vars]
+# Optional: Set any non-secret variables here
+# Example: DEBUG = "false"
+
+# ============================================================
+# SECRETS (Set via CLI)
+# ============================================================
+# These are set with: npx wrangler secret put WEBHOOK_URL
+# 
+# WEBHOOK_URL = "https://discord.com/api/webhooks/1540047524243439647/Cu5ZJ5EEHANvxHWASchLm8rvBlSRaipPvkDKs_yEubQvIoDc74iFV2DTW97MkhQrK1gP"
+
+# ============================================================
+# OBSERVABILITY
+# ============================================================
+
+[observability]
+logs_enabled = true
