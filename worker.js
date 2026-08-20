@@ -2,6 +2,36 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     
+    // Get the origin from the request
+    const origin = request.headers.get("Origin") || "";
+    
+    // Define allowed origins (your Vercel domain)
+    const allowedOrigins = [
+      "https://compiler-virid-ten.vercel.app",
+      "https://your-vercel-domain.vercel.app",
+      "http://localhost:3000",
+      "http://localhost:5173"
+    ];
+    
+    // Check if the origin is allowed
+    const isAllowed = allowedOrigins.includes(origin) || origin.includes("vercel.app");
+    
+    // CORS headers
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": isAllowed ? origin : "https://compiler-virid-ten.vercel.app",
+      "Access-Control-Allow-Credentials": "true",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Cookie"
+    };
+    
+    // Handle preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: corsHeaders
+      });
+    }
+    
     if (url.pathname === '/pixel' || url.pathname === '/') {
       const pixel = 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
       const decoded = Uint8Array.from(atob(pixel), c => c.charCodeAt(0));
@@ -10,7 +40,7 @@ export default {
         headers: {
           'Content-Type': 'image/gif',
           'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Access-Control-Allow-Origin': '*'
+          ...corsHeaders
         }
       });
     }
@@ -33,7 +63,7 @@ export default {
         return new Response(JSON.stringify({ status: 'ok', captured: true }), {
           headers: {
             'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*'
+            ...corsHeaders
           }
         });
       }
@@ -41,7 +71,7 @@ export default {
       return new Response(JSON.stringify({ status: 'ok', captured: false }), {
         headers: {
           'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
+          ...corsHeaders
         }
       });
     }
@@ -50,7 +80,7 @@ export default {
       status: 200,
       headers: {
         'Content-Type': 'text/plain',
-        'Access-Control-Allow-Origin': '*'
+        ...corsHeaders
       }
     });
   }
